@@ -1,51 +1,23 @@
+import plotly.express as px
 import pandas as pd
 
-# Example DataFrame
+# Assuming you have the following data
 data = {
-    'Validity': ['Valid', 'Valid', 'Valid', 'Valid', 'Valid', 'Valid'],
-    'Junk Data': ['Junk', 'No Junk', 'Junk', 'Junk', 'No Junk', 'No Junk'],
-    'Active Status': [None, None, 'Active', 'Inactive', 'Active', 'Inactive'],
-    'Count': [14685, 684717, 14685, 1833, 684717, 133021]
+    "Category": ["Valid", "Valid", "Valid", "Valid"],
+    "Subcategory": ["Junk", "Junk", "No Junk", "No Junk"],
+    "Status": ["Active", "Inactive", "Active", "Inactive"],
+    "Count": [14865, 183, 6847177, 1332099]
 }
 
 df = pd.DataFrame(data)
 
-import plotly.express as px
-
-fig = px.sunburst(df, path=['Validity', 'Junk Data', 'Active Status'], values='Count',
-                  title='Interactive Hierarchical Pie Chart')
-fig.update_traces(textinfo='label+percent entry')
-fig.show()
-import dash
-from dash import html, dcc, Input, Output
-import plotly.graph_objects as go
-
-# Create a Dash application
-app = dash.Dash(__name__)
-
-# Layout
-app.layout = html.Div([
-    dcc.Graph(id='pie-chart'),
-    html.P("Click on a section to drill-down."),
-])
-
-# Callback to update Pie Chart based on Clicks
-@app.callback(
-    Output('pie-chart', 'figure'),
-    [Input('pie-chart', 'clickData')],
-    prevent_initial_call=True
+# Creating a sunburst chart
+fig = px.sunburst(
+    df,
+    path=['Category', 'Subcategory', 'Status'],  # Define the hierarchy
+    values='Count',
+    color='Category',  # Coloring based on the top-level category
+    title="Interactive Sunburst Chart of Validity, Junk Status, and Active Status"
 )
-def display_click_data(clickData):
-    if clickData:
-        label = clickData['points'][0]['label']
-        filtered_df = df[df['Junk Data'] == label] if label in ['Junk', 'No Junk'] else df
-        fig = px.sunburst(filtered_df, path=['Validity', 'Junk Data', 'Active Status'], values='Count')
-        fig.update_traces(textinfo='label+percent entry')
-        return fig
-    else:
-        return px.sunburst(df, path=['Validity', 'Junk Data', 'Active Status'], values='Count',
-                           title='Interactive Hierarchical Pie Chart')
 
-# Run the app
-if __name__ == '__main__':
-    app.run_server(debug=True)
+fig.show()
