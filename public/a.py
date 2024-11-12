@@ -1,59 +1,55 @@
-import snowflake.connector
-import random
+from snowflake.snowpark import Session
+from snowflake.snowpark.functions import col, count, distinct, try_cast, lit, sum as sum_, when
+import json
 
 # Snowflake connection details
-SNOWFLAKE_USER = 'your_username'
-SNOWFLAKE_PASSWORD = 'your_password'
-SNOWFLAKE_ACCOUNT = 'your_account'
-SNOWFLAKE_WAREHOUSE = 'your_warehouse'
-SNOWFLAKE_ROLE = 'your_role'
+connection_parameters = {
+    "account": "your_account",
+    "user": "your_username",
+    "password": "your_password",
+    "role": "your_role",
+    "warehouse": "your_warehouse",
+    "database": "your_database",
+    "schema": "your_schema"
+}
 
-# Database and schema details for source and target tables
+# Initialize a Snowflake Snowpark session
+session = Session.builder.configs(connection_parameters).create()
+
+# Table details
 SOURCE_DATABASE = 'db1'
 SOURCE_SCHEMA = 'schema1'
 SOURCE_TABLE = 'source_table'
 TARGET_DATABASE = 'db2'
 TARGET_SCHEMA = 'schema2'
 TARGET_TABLE = 'target_table'
+PRIMARY_KEY_COLUMN = 'primary_key_column'  # Replace with actual primary key column
 
-# Connect to Snowflake
-conn = snowflake.connector.connect(
-    user=SNOWFLAKE_USER,
-    password=SNOWFLAKE_PASSWORD,
-    account=SNOWFLAKE_ACCOUNT,
-    warehouse=SNOWFLAKE_WAREHOUSE,
-    role=SNOWFLAKE_ROLE
-)
-
-def get_row_count(database, schema, table):
-    query = f"SELECT COUNT(*) FROM {database}.{schema}.{table}"
-    cur = conn.cursor()
-    cur.execute(query)
-    row_count = cur.fetchone()[0]
-    cur.close()
-    return row_count
-
-def get_table_checksum(database, schema, table):
-    query = f"SELECT HASH_AGG(TO_CHAR(*)) AS checksum FROM {database}.{schema}.{table}"
-    cur = conn.cursor()
-    cur.execute(query)
-    checksum = cur.fetchone()[0]
-    cur.close()
-    return checksum
-
-def validate_row_counts():
-    source_row_count = get_row_count(SOURCE_DATABASE, SOURCE_SCHEMA, SOURCE_TABLE)
-    target_row_count = get_row_count(TARGET_DATABASE, TARGET_SCHEMA, TARGET_TABLE)
-    if source_row_count == target_row_count:
+def row_count_check():
+    # Row count in source table
+    source_df = session.table(f"{SOURCE_DATABASE}.{SOURCE_SCHEMA}.{SOURCE_TABLE}")
+    source_count = source_df.count()
+    
+    # Row count in target table
+    target_df = session.table(f"{TARGET_DATABASE}.{TARGET_SCHEMA}.{TARGET_TABLE}")
+    target_count = target_df.count()
+    
+    if source_count == target_count:
         print("Row count check passed.")
         return True
     else:
-        print(f"Row count mismatch: Source({source_row_count}) != Target({target_row_count})")
+        print(f"Row count mismatch: Source({source_count}) != Target({target_count})")
         return False
 
-def validate_table_checksums():
-    source_checksum = get_table_checksum(SOURCE_DATABASE, SOURCE_SCHEMA, SOURCE_TABLE)
-    target_checksum = get_table_checksum(TARGET_DATABASE, TARGET_SCHEMA, TARGET_TABLE)
+def table_checksum_check():
+    # Calculating checksum for source table
+    source_df = session.table(f"{SOURCE_DATABASE}.{SOURCE_SCHEMA}.{SOURCE_TABLE}")
+    source_checksum = source_df.select(sum_(col("column1") + col("column2") + col("column3")).alias("checksum")).collect()[0]["checksum"]
+    
+    # Calculating checksum for target table
+    target_df = session.table(f"{TARGET_DATABASE}.{TARGET_SCHEMA}.{TARGET_TABLE}")
+    target_checksum = target_df.select(sum_(col("column1") + col("column2") + col("column3")).alias("checksum")).collect()[0]["checksum"]
+    
     if source_checksum == target_checksum:
         print("Table checksum check passed.")
         return True
@@ -61,67 +57,64 @@ def validate_table_checksums():
         print("Table checksum mismatch detected.")
         return False
 
-def validate_row_checksums(primary_key_column):
-    query = f"""
-        SELECT src.{primary_key_column}, 
-               HASH_AGG(TO_CHAR(*)) AS source_row_checksum,
-               tgt.{primary_key_column},
-               HASH_AGG(TO_CHAR(*)) AS target_row_checksum
-        FROM {SOURCE_DATABASE}.{SOURCE_SCHEMA}.{SOURCE_TABLE} AS src
-        FULL OUTER JOIN {TARGET_DATABASE}.{TARGET_SCHEMA}.{TARGET_TABLE} AS tgt
-        ON src.{primary_key_column} = tgt.{primary_key_column}
-        WHERE HASH_AGG(TO_CHAR(src.*)) != HASH_AGG(TO_CHAR(tgt.*))
-    """
-    cur = conn.cursor()
-    cur.execute(query)
-    rows = cur.fetchall()
-    cur.close()
-    if not rows:
+def row_level_checksum_check():
+    source_df = session.table(f"{SOURCE_DATABASE}.{SOURCE_SCHEMA}.{SOURCE_TABLE}")
+    target_df = session.table(f"{TARGET_DATABASE}.{TARGET_SCHEMA}.{TARGET_TABLE}")
+
+    # Creating row-level checksum for each row and joining on primary key
+    source_df = source_df.with_column("row_checksum", sum_(col("column1") + col("column2") + col("column3")))
+    target_df = target_df.with_column("row_checksum", sum_(col("column1") + col("column2") + col("column3")))
+    
+    join_df = source_df.join(target_df, source_df[PRIMARY_KEY_COLUMN] == target_df[PRIMARY_KEY_COLUMN], "full_outer") \
+                       .select(source_df[PRIMARY_KEY_COLUMN],
+                               source_df["row_checksum"].alias("source_checksum"),
+                               target_df["row_checksum"].alias("target_checksum")) \
+                       .filter(col("source_checksum") != col("target_checksum"))
+
+    mismatch_count = join_df.count()
+    
+    if mismatch_count == 0:
         print("Row-level checksum validation passed.")
         return True
     else:
-        print(f"Row-level checksum mismatch found in {len(rows)} rows.")
+        print(f"Row-level checksum mismatch found in {mismatch_count} rows.")
         return False
 
-def validate_random_sample(sample_size=100, primary_key_column="id"):
-    query = f"""
-        SELECT src.{primary_key_column}, src.*, tgt.*
-        FROM {SOURCE_DATABASE}.{SOURCE_SCHEMA}.{SOURCE_TABLE} AS src
-        JOIN {TARGET_DATABASE}.{TARGET_SCHEMA}.{TARGET_TABLE} AS tgt
-        ON src.{primary_key_column} = tgt.{primary_key_column}
-        WHERE src.{primary_key_column} IN (
-            SELECT {primary_key_column} FROM {SOURCE_DATABASE}.{SOURCE_SCHEMA}.{SOURCE_TABLE} SAMPLE ({sample_size})
-        )
-        AND (src.column1 != tgt.column1 OR src.column2 != tgt.column2) -- Add columns to compare here
-    """
-    cur = conn.cursor()
-    cur.execute(query)
-    rows = cur.fetchall()
-    cur.close()
-    if not rows:
+def random_sample_check(sample_size=100):
+    # Sample random rows from source and target tables
+    source_sample = session.table(f"{SOURCE_DATABASE}.{SOURCE_SCHEMA}.{SOURCE_TABLE}").limit(sample_size)
+    target_sample = session.table(f"{TARGET_DATABASE}.{TARGET_SCHEMA}.{TARGET_TABLE}").limit(sample_size)
+    
+    # Check if all sampled rows match in source and target
+    join_df = source_sample.join(target_sample, source_sample[PRIMARY_KEY_COLUMN] == target_sample[PRIMARY_KEY_COLUMN])
+    mismatches = join_df.filter((col("source_column1") != col("target_column1")) |
+                                (col("source_column2") != col("target_column2"))).count()
+    
+    if mismatches == 0:
         print("Random sampling check passed.")
         return True
     else:
-        print(f"Random sampling mismatch found in {len(rows)} rows.")
+        print(f"Random sampling mismatch found in {mismatches} rows.")
         return False
 
-# Main validation function
 def main():
-    if validate_row_counts():
-        if validate_table_checksums():
+    # Perform row count check
+    if row_count_check():
+        # If row count matches, check table-level checksum
+        if table_checksum_check():
             print("Data validation passed.")
         else:
+            # If table checksum doesn't match, proceed to row-level checksum validation
             print("Performing row-level validation due to checksum mismatch...")
-            primary_key_column = 'your_primary_key_column'  # Update this to your actual primary key
-            if validate_row_checksums(primary_key_column):
+            if row_level_checksum_check():
                 print("Data validation passed at row level.")
             else:
                 print("Row-level validation detected mismatches.")
     else:
         print("Row count mismatch detected, skipping further checks.")
 
-# Run the validation
+# Execute the main function
 main()
 
-# Close connection
-conn.close()
+# Close Snowflake session
+session.close()
