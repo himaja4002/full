@@ -1,7 +1,7 @@
 from snowflake.snowpark import Session
 from snowflake.snowpark.functions import col, count, sum as sum_, try_cast, lit
 
-def data_validation_with_secondary_role(session: Session) -> str:
+def main(session: Session) -> str:
     # Switch to the secondary role
     session.sql("USE ROLE your_secondary_role").collect()  # Replace 'your_secondary_role' with the secondary role name
 
