@@ -1,8 +1,8 @@
 from snowflake.snowpark import Session
-from snowflake.snowpark.functions import col, count, sum as sum_, try_cast, lit
+from snowflake.snowpark.functions import col, count, sum as sum_, try_cast, lit, concat, trim, substring
 
 def main(session: Session) -> str:
-    # Switch to the secondary role
+    # Switch to the secondary role if required
     session.sql("USE ROLE your_secondary_role").collect()  # Replace 'your_secondary_role' with the secondary role name
 
     # Table details
@@ -13,6 +13,17 @@ def main(session: Session) -> str:
     TARGET_SCHEMA = 'schema2'
     TARGET_TABLE = 'target_table'
     PRIMARY_KEY_COLUMN = 'primary_key_column'  # Replace with actual primary key column
+
+    # Transformation function for A_PARTY_TKN
+    def transform_party_tkn(column):
+        return try_cast(
+            concat(
+                substring(trim(column), 5, 5),
+                substring(trim(column), 3, 2),
+                substring(trim(column), 1, 2)
+            ),
+            col_type="VARCHAR"
+        )
 
     def row_count_check():
         # Row count in source table
@@ -27,6 +38,22 @@ def main(session: Session) -> str:
             return "Row count check passed."
         else:
             return f"Row count mismatch: Source({source_count}) != Target({target_count})"
+
+    def distinct_member_count_check():
+        # Load the tables
+        source_df = session.table(f"{SOURCE_DATABASE}.{SOURCE_SCHEMA}.{SOURCE_TABLE}")
+        target_df = session.table(f"{TARGET_DATABASE}.{TARGET_SCHEMA}.{TARGET_TABLE}")
+
+        # Apply transformation to A_PARTY_TKN in source and join with target on MBR_NR
+        joined_df = source_df \
+            .join(target_df, 
+                  transform_party_tkn(source_df["A_PARTY_TKN"]) == target_df["MBR_NR"]) \
+            .filter(source_df["MFP_FILE_ID"] == lit('17272220370-A_PS_CC_Bureau_2024-09-05'))
+
+        # Count distinct MBR_NR after joining
+        distinct_count = joined_df.select(target_df["MBR_NR"]).distinct().count()
+        
+        return f"Distinct MBR_NR count after join: {distinct_count}"
 
     def table_checksum_check():
         # Calculating checksum for source table
@@ -63,29 +90,15 @@ def main(session: Session) -> str:
         else:
             return f"Row-level checksum mismatch found in {mismatch_count} rows."
 
-    def random_sample_check(sample_size=100):
-        # Sample random rows from source and target tables
-        source_sample = session.table(f"{SOURCE_DATABASE}.{SOURCE_SCHEMA}.{SOURCE_TABLE}").limit(sample_size)
-        target_sample = session.table(f"{TARGET_DATABASE}.{TARGET_SCHEMA}.{TARGET_TABLE}").limit(sample_size)
-        
-        # Check if all sampled rows match in source and target
-        join_df = source_sample.join(target_sample, source_sample[PRIMARY_KEY_COLUMN] == target_sample[PRIMARY_KEY_COLUMN])
-        mismatches = join_df.filter((col("source_column1") != col("target_column1")) |
-                                    (col("source_column2") != col("target_column2"))).count()
-        
-        if mismatches == 0:
-            return "Random sampling check passed."
-        else:
-            return f"Random sampling mismatch found in {mismatches} rows."
-
     # Perform validation checks
     result = []
     result.append(row_count_check())
+    result.append(distinct_member_count_check())
     
     # If row count check passes, continue with further validation
     if "passed" in result[0]:
         result.append(table_checksum_check())
-        if "mismatch" in result[1]:
+        if "mismatch" in result[2]:
             result.append(row_level_checksum_check())
         else:
             result.append("Table checksum validation passed, no need for row-level check.")
