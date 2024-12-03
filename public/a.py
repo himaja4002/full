@@ -1,83 +1,59 @@
-from snowflake.snowpark import Session
-from snowflake.snowpark.functions import col, count, sum as sum_, try_cast, concat, substring, trim, lit, distinct
-from snowflake.snowpark.types import StringType
+import snowflake.snowpark as snowpark
+from snowflake.snowpark.functions import col
 
-# Snowflake connection setup (if needed externally, though typically for Snowpark in Snowflake, connection is automatic)
-def main(session: Session) -> str:
-    # Switch to the secondary role if required
-    session.sql("USE ROLE your_secondary_role").collect()  # Replace 'your_secondary_role' with the secondary role name
+def main(session: snowpark.Session):
+    # Step 1: Use secondary roles
+    session.sql("USE SECONDARY ROLES ALL").collect()
+    
+    # Step 2: Source and target table names
+    source_table = "Table1"
+    target_table = "Table2"
 
-    # Table details
-    SOURCE_DATABASE = 'db1'
-    SOURCE_SCHEMA = 'schema1'
-    SOURCE_TABLE = 'source_table'
-    TARGET_DATABASE = 'db2'
-    TARGET_SCHEMA = 'schema2'
-    TARGET_TABLE = 'target_table'
+    # Step 3: Fetch column names dynamically
+    source_columns = session.table(source_table).schema.names
+    target_columns = session.table(target_table).schema.names
 
-    # Transformation function for A_PARTY_TKN
-    def transform_party_tkn(column):
-        return try_cast(
-            concat(
-                substring(trim(column), 5, 5),
-                substring(trim(column), 3, 2),
-                substring(trim(column), 1, 2)
-            ),
-            StringType()
-        )
-
-    def row_count_check():
-        # Row count in source table
-        source_df = session.table(f"{SOURCE_DATABASE}.{SOURCE_SCHEMA}.{SOURCE_TABLE}")
-        source_count = source_df.count()
-        
-        # Row count in target table
-        target_df = session.table(f"{TARGET_DATABASE}.{TARGET_SCHEMA}.{TARGET_TABLE}")
-        target_count = target_df.count()
-        
-        if source_count == target_count:
-            return "Row count check passed."
+    # Step 4: Generate column mappings dynamically
+    column_mapping = []
+    for col_name in source_columns:
+        # Handle "PREMIER" to "PRMR" pattern
+        if col_name.startswith("PREMIER"):
+            mapped_col = col_name.replace("PREMIER", "PRMR")
+            if mapped_col in target_columns:
+                column_mapping.append((col_name, mapped_col))
+        # Check if the column exists with the same name in both tables
+        elif col_name in target_columns:
+            column_mapping.append((col_name, col_name))
+        # Additional custom logic for columns not matching directly
         else:
-            return f"Row count mismatch: Source({source_count}) != Target({target_count})"
+            # Example: If other columns have a prefix or suffix
+            possible_match = col_name.replace("_SRC", "_TGT")  # Replace with your convention
+            if possible_match in target_columns:
+                column_mapping.append((col_name, possible_match))
 
-    def distinct_member_count_check():
-        # Load the tables
-        source_df = session.table(f"{SOURCE_DATABASE}.{SOURCE_SCHEMA}.{SOURCE_TABLE}")
-        target_df = session.table(f"{TARGET_DATABASE}.{TARGET_SCHEMA}.{TARGET_TABLE}")
-
-        # Apply transformation to A_PARTY_TKN in source and join with target on transformed column
-        transformed_source_df = source_df.with_column("transformed_id", transform_party_tkn(source_df["A_PARTY_TKN"]))
+    # Step 5: Validate columns
+    validation_results = []
+    for source_col, target_col in column_mapping:
+        # Build a query to compare columns
+        mismatch_query = session.sql(f"""
+            SELECT
+                '{source_col}' AS column_name,
+                COUNT(*) AS mismatched_count
+            FROM {source_table} t1
+            FULL OUTER JOIN {target_table} t2
+                ON t1.AS_OF_DT = t2.AS_OF_DT  -- Replace with your join condition
+            WHERE t1.{source_col} <> t2.{target_col}
+                OR (t1.{source_col} IS NULL AND t2.{target_col} IS NOT NULL)
+                OR (t1.{source_col} IS NOT NULL AND t2.{target_col} IS NULL)
+        """)
         
-        # Calculate distinct count of transformed_id in source
-        source_distinct_count = transformed_source_df.select("transformed_id").distinct().count()
+        # Execute and fetch results
+        result = mismatch_query.collect()[0]
+        validation_results.append(result)
+    
+    # Step 6: Convert results to a Snowpark DataFrame and display
+    result_df = session.create_dataframe(validation_results, schema=["Column", "Mismatched_Count"])
+    result_df.show()
 
-        # Calculate distinct count of MBR_NR in target
-        target_distinct_count = target_df.select("MBR_NR").distinct().count()
-        
-        if source_distinct_count == target_distinct_count:
-            return f"Distinct member count check passed. Count: {source_distinct_count}"
-        else:
-            return f"Distinct member count mismatch: Source({source_distinct_count}) != Target({target_distinct_count})"
-
-    def table_checksum_check():
-        # Calculating checksum for source table
-        source_df = session.table(f"{SOURCE_DATABASE}.{SOURCE_SCHEMA}.{SOURCE_TABLE}")
-        source_checksum = source_df.select(sum_(col("column1") + col("column2") + col("column3")).alias("checksum")).collect()[0]["checksum"]
-        
-        # Calculating checksum for target table
-        target_df = session.table(f"{TARGET_DATABASE}.{TARGET_SCHEMA}.{TARGET_TABLE}")
-        target_checksum = target_df.select(sum_(col("column1") + col("column2") + col("column3")).alias("checksum")).collect()[0]["checksum"]
-        
-        if source_checksum == target_checksum:
-            return "Table checksum check passed."
-        else:
-            return "Table checksum mismatch detected."
-
-    # Perform validation checks
-    result = []
-    result.append(row_count_check())
-    result.append(distinct_member_count_check())
-    result.append(table_checksum_check())
-
-    # Return the results as a single string
-    return "\n".join(result)
+    # Return results
+    return result_df
